@@ -9,32 +9,45 @@ spec:
   address: http://0.0.0.0:8185
   services:
     upstream:
+      # The shipped httpbin backend just echoes — it serves no AgentCard, so the
+      # governor has nothing to reshape. Point this at a real A2A agent to watch
+      # skills[] get governed. `address` is honoured as host:port ONLY; the
+      # upstream path prefix goes in `destinationPath` below.
       address: "http://backend"
       routes:
+        # destinationPath is a PREFIX: Flex strips the API base path, then
+        # APPENDS the remaining inbound path (with no leading slash) to it. For a
+        # non-root upstream prefix keep a TRAILING slash here, e.g.
+        # `/api/platform/<card-id>/a2a/` so an inbound `/.well-known/agent-card.json`
+        # yields `/api/platform/<card-id>/a2a/.well-known/agent-card.json`.
         - config:
             destinationPath: /
-  policies:
-    - policyRef:
-        name: a-two-a-agent-card-skill-governor-flex-v0-1
-        namespace: default
-      config:
-        # Default allow when no visibility rule matches a skill.
-        defaultAllow: true
-        # Authentication custom-property key carrying the caller's scope(s).
-        scopeClaimKey: scope
-        # Ordered allow/deny rules — first match per skill wins.
-        visibility:
-          # Hide the "secret" skill from everyone (public + extended).
-          - effect: deny
-            audienceType: any
-            skillId: secret
-          # Hide any skill whose id starts with "admin." unless overridden above.
-          - effect: deny
-            audienceType: any
-            skillIdPattern: "admin.*"
-        # Rewrite an existing skill or inject a new one, keyed by skill.id.
-        skills:
-          - audienceType: any
-            skill:
-              id: search
-              description: "Search the knowledge base (governed description)"
+      # OUTBOUND-injection policy: it binds under the service (the outbound
+      # slot), NOT under top-level `spec.policies` (the inbound slot). Binding it
+      # inbound is rejected by the gateway: "target ... is invalid to extension
+      # ... because it is of kind ApiInstance".
+      policies:
+        - policyRef:
+            name: a-two-a-agent-card-skill-governor-flex-v0-1
+            namespace: default
+          config:
+            # Default allow when no visibility rule matches a skill.
+            defaultAllow: true
+            # Authentication custom-property key carrying the caller's scope(s).
+            scopeClaimKey: scope
+            # Ordered allow/deny rules — first match per skill wins.
+            visibility:
+              # Hide the "secret" skill from everyone (public + extended).
+              - effect: deny
+                audienceType: any
+                skillId: secret
+              # Hide any skill whose id starts with "admin." unless overridden above.
+              - effect: deny
+                audienceType: any
+                skillIdPattern: "admin.*"
+            # Rewrite an existing skill or inject a new one, keyed by skill.id.
+            skills:
+              - audienceType: any
+                skill:
+                  id: search
+                  description: "Search the knowledge base (governed description)"
