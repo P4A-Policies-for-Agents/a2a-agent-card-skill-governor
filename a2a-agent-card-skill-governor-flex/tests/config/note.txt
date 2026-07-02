@@ -1,0 +1,6 @@
+This directory contains the common configuration files for all the tests.
+`registration.yaml` must be placed here (it is .gitignore'd and device-specific).
+
+Create it by running the Omni Gateway registration command in this directory,
+or copy an existing registration.yaml from another policy's tests/config on the
+same device. Do NOT run the Docker start command — `make test` handles that.
