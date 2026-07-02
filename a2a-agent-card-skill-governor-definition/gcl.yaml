@@ -1,0 +1,18 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: Extension
+metadata:
+  labels:
+    title: A2A Agent Card Skill Governor
+    description: Governs the skills[] of an A2A Agent Card in-flight per caller identity.
+    category: security
+    metadata/interfaceScope: api
+    metadata/capabilities/injectionPoint: outbound
+    metadata/capabilities/assetTypes: a2a,a2av1
+spec:
+  extends:
+    - name: extension-definition
+      namespace: default
+  properties: {}
