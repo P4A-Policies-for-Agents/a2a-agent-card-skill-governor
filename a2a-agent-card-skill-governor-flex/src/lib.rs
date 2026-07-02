@@ -397,7 +397,11 @@ async fn response_filter(
         Err(e) => {
             logger::error!("[skill-governor] failing closed on card shaping: {}", e);
             // Body-only fail-closed: replace the card body with the error
-            // envelope; leave :status as the upstream committed it.
+            // envelope; leave :status as the upstream committed it. A set_body
+            // failure here would leave the ungoverned upstream card (a leak),
+            // but that is unreachable: BodyNotSent is excluded by the
+            // contains_body() guard above, and the envelope is a few hundred
+            // bytes so ExceededBodySize cannot fire.
             set_body_or_log(handler, &fail_closed_body(&ctx.variant), "fail-closed body");
         }
     }
