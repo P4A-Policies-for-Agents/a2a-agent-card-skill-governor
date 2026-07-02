@@ -325,30 +325,31 @@ fn fail_closed_body(variant: &Variant) -> (u32, Vec<u8>) {
     }
 }
 
-/// Overwrite the response body with `body`, keeping `content-length` consistent.
-/// A stale `content-length` after a body swap truncates or corrupts the response,
-/// so it is set to the new byte length. On a body-less flow `set_body` returns
-/// `BodyNotSent`; the card fetch always has a body, but we log and give up rather
-/// than panic if it does not.
+/// Overwrite the response body with `body`. The stale upstream `content-length`
+/// is removed so the gateway recomputes it from the new bytes — setting it by
+/// hand is fragile if the gateway re-encodes, and dropping it is the sanctioned
+/// PDK pattern (pdk-request-headers-bodies: "Remove `content-length` before
+/// modifying body"). On a body-less flow `set_body` returns `BodyNotSent`; the
+/// card fetch always has a body, but we log and give up rather than panic if not.
 fn write_body(handler: &dyn HeadersBodyHandler, body: &[u8]) {
+    handler.remove_header(CONTENT_LENGTH_HEADER);
     if let Err(e) = handler.set_body(body) {
         logger::error!("[skill-governor] failed to write governed body: {}", e);
-        return;
     }
-    handler.set_header(CONTENT_LENGTH_HEADER, &body.len().to_string());
 }
 
 /// Replace the response with the surface-appropriate fail-closed error, updating
-/// the `:status` pseudo-header, `content-type`, body, and `content-length`.
+/// the `:status` pseudo-header and `content-type`. `content-length` is removed so
+/// the gateway recomputes it from the replacement body.
 fn send_fail_closed(handler: &dyn HeadersBodyHandler, variant: &Variant) {
     let (status, body) = fail_closed_body(variant);
+    handler.remove_header(CONTENT_LENGTH_HEADER);
     if let Err(e) = handler.set_body(&body) {
         logger::error!("[skill-governor] failed to write fail-closed body: {}", e);
         return;
     }
     handler.set_header(STATUS_PSEUDO_HEADER, &status.to_string());
     handler.set_header(CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE);
-    handler.set_header(CONTENT_LENGTH_HEADER, &body.len().to_string());
 }
 
 /// Response filter: when the request filter flagged this as a card fetch,
@@ -369,6 +370,9 @@ async fn response_filter(
     };
 
     let state = response_state.into_headers_body_state().await;
+    if !state.contains_body() {
+        return; // no body to shape → pass through
+    }
     let handler = state.handler();
     let body = handler.body();
 
