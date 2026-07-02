@@ -35,9 +35,7 @@ const A2A_VERSION_HEADER: &str = "A2A-Version";
 const A2A_VERSION_QUERY_KEY: &str = "a2a-version";
 const A2A_VERSION_V1: &str = "1.0";
 const PATH_PSEUDO_HEADER: &str = ":path";
-const STATUS_PSEUDO_HEADER: &str = ":status";
 const CONTENT_LENGTH_HEADER: &str = "content-length";
-const JSON_CONTENT_TYPE: &str = "application/json";
 /// JSON-RPC internal-error code (spec §7): fail-closed shaping errors on the
 /// JSON-RPC bindings surface here, at HTTP 200 (JSON-RPC in-band convention).
 const JSONRPC_INTERNAL_ERROR: i32 = -32603;
@@ -275,16 +273,31 @@ fn transform_card_body(
     Ok(Some(out))
 }
 
-/// Build the surface-appropriate fail-closed error body (spec §7):
-/// - JSON-RPC bindings (`Legacy`/`V1JsonRpc`): a JSON-RPC `-32603 INTERNAL`
-///   envelope — HTTP status stays 200 by JSON-RPC in-band convention.
-/// - `V1HttpJson`: a `google.rpc.Status` body at HTTP 500.
-/// - `PublicGet`: a plain JSON error at HTTP 500.
+/// Build the surface-appropriate fail-closed error BODY (spec §7).
 ///
-/// Returns `(status, body_bytes)`. Never blocks on serialization: falls back to
-/// a static minimal body if the (fixed, tiny) error object somehow fails to
-/// serialize, so the fail-closed path itself cannot panic.
-fn fail_closed_body(variant: &Variant) -> (u32, Vec<u8>) {
+/// This is a body-only contract: the HTTP status is deliberately NOT returned
+/// and NOT rewritten. On the split headers→body flow the `:status` header is
+/// committed in the headers phase, *before* the body is read — but the
+/// fail-closed decision can only be made after reading the body and confirming
+/// a card failed to shape. A body-content-dependent status change is therefore
+/// impossible on the flow the runtime actually supports (the combined
+/// headers+body state that would allow it hangs on the response leg on
+/// Flex 1.12.1). The security property holds regardless: the card body is
+/// replaced with an error envelope, so ungoverned skills are never leaked. Only
+/// status-code fidelity for the two bare-HTTP surfaces is given up; the upstream
+/// status (normally 200) is preserved.
+///
+/// Body shapes:
+/// - JSON-RPC bindings (`Legacy`/`V1JsonRpc`): a JSON-RPC `-32603 INTERNAL`
+///   envelope (HTTP 200 was always the JSON-RPC in-band convention).
+/// - `V1HttpJson`: a `google.rpc.Status`-shaped error body. The `error.code: 500`
+///   is a payload field, not the HTTP status.
+/// - `PublicGet`: a plain JSON error body.
+///
+/// Never blocks on serialization: falls back to a static minimal body if the
+/// (fixed, tiny) error object somehow fails to serialize, so the fail-closed
+/// path itself cannot panic.
+fn fail_closed_body(variant: &Variant) -> Vec<u8> {
     const MESSAGE: &str = "Agent Card could not be governed";
     match variant {
         Variant::Legacy | Variant::V1JsonRpc => {
@@ -293,10 +306,9 @@ fn fail_closed_body(variant: &Variant) -> (u32, Vec<u8>) {
                 "id": Value::Null,
                 "error": { "code": JSONRPC_INTERNAL_ERROR, "message": MESSAGE }
             });
-            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+            serde_json::to_vec(&body).unwrap_or_else(|_| {
                 br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Agent Card could not be governed"}}"#.to_vec()
-            });
-            (200, bytes)
+            })
         }
         Variant::V1HttpJson => {
             let body = serde_json::json!({
@@ -310,57 +322,52 @@ fn fail_closed_body(variant: &Variant) -> (u32, Vec<u8>) {
                     }]
                 }
             });
-            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+            serde_json::to_vec(&body).unwrap_or_else(|_| {
                 br#"{"error":{"code":500,"message":"Agent Card could not be governed"}}"#.to_vec()
-            });
-            (500, bytes)
+            })
         }
         Variant::PublicGet => {
             let body = serde_json::json!({ "error": MESSAGE });
-            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+            serde_json::to_vec(&body).unwrap_or_else(|_| {
                 br#"{"error":"Agent Card could not be governed"}"#.to_vec()
-            });
-            (500, bytes)
+            })
         }
     }
 }
 
-/// Overwrite the response body with `body`. The stale upstream `content-length`
-/// is removed so the gateway recomputes it from the new bytes — setting it by
-/// hand is fragile if the gateway re-encodes, and dropping it is the sanctioned
-/// PDK pattern (pdk-request-headers-bodies: "Remove `content-length` before
-/// modifying body"). On a body-less flow `set_body` returns `BodyNotSent`; the
-/// card fetch always has a body, but we log and give up rather than panic if not.
-fn write_body(handler: &dyn HeadersBodyHandler, body: &[u8]) {
-    handler.remove_header(CONTENT_LENGTH_HEADER);
+/// Write `body` to the response body handler, logging (never panicking) on
+/// failure. Shared by the governed-body and fail-closed paths — both simply
+/// replace the body. The stale upstream `content-length` is dropped earlier, in
+/// the headers phase, so the gateway recomputes it from the new bytes (the
+/// sanctioned PDK pattern — pdk-request-headers-bodies: "Remove `content-length`
+/// before modifying body"). On a body-less flow `set_body` returns `BodyNotSent`;
+/// the card fetch always has a body, but we log and give up rather than panic if
+/// not.
+fn set_body_or_log(handler: &dyn BodyHandler, body: &[u8], what: &str) {
     if let Err(e) = handler.set_body(body) {
-        logger::error!("[skill-governor] failed to write governed body: {}", e);
+        logger::error!("[skill-governor] failed to write {}: {}", what, e);
     }
-}
-
-/// Replace the response with the surface-appropriate fail-closed error, updating
-/// the `:status` pseudo-header and `content-type`. `content-length` is removed so
-/// the gateway recomputes it from the replacement body.
-fn send_fail_closed(handler: &dyn HeadersBodyHandler, variant: &Variant) {
-    let (status, body) = fail_closed_body(variant);
-    handler.remove_header(CONTENT_LENGTH_HEADER);
-    if let Err(e) = handler.set_body(&body) {
-        logger::error!("[skill-governor] failed to write fail-closed body: {}", e);
-        return;
-    }
-    handler.set_header(STATUS_PSEUDO_HEADER, &status.to_string());
-    handler.set_header(CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE);
 }
 
 /// Response filter: when the request filter flagged this as a card fetch,
 /// reshape the card's `skills[]` and write it back. Fails closed — replacing the
-/// card with a surface-appropriate error — if a confirmed card cannot be shaped.
+/// card *body* with a surface-appropriate error envelope — if a confirmed card
+/// cannot be shaped.
 ///
-/// Uses the stop-iteration headers+body state (`enable_stop_iteration`) so the
-/// body can be read and, on the fail-closed path, the `:status` pseudo-header
-/// rewritten in the same pass — response body state alone cannot alter status.
+/// Uses the split headers→body flow (mirrors the sibling `mcp-apps` / `rest-to-a2a`
+/// response filters): the header mutation (`content-length` removal) happens in
+/// the headers phase, then the body is read and rewritten in the body phase. The
+/// combined headers+body state is deliberately NOT used on the response leg — it
+/// hangs on Flex 1.12.1, yielding an Envoy 504 on every response-transforming
+/// request.
+///
+/// Consequence for fail-closed: the HTTP `:status` is committed in the headers
+/// phase, before the body is read, so it is left as whatever the upstream sent
+/// (normally 200). Only the body is replaced — see [`fail_closed_body`]. The
+/// security property (never leak ungoverned skills) is preserved because the
+/// card body is always overwritten on failure.
 async fn response_filter(
-    response_state: ResponseState,
+    response: ResponseHeadersState,
     request_data: RequestData<Option<CardContext>>,
     rules: &GovernorRules,
 ) {
@@ -369,20 +376,29 @@ async fn response_filter(
         _ => return, // not a card fetch → pass through
     };
 
-    let state = response_state.into_headers_body_state().await;
-    if !state.contains_body() {
+    if !response.contains_body() {
         return; // no body to shape → pass through
     }
-    let handler = state.handler();
+
+    // Header mutations must happen in the headers phase. Drop the stale
+    // content-length now, whether or not we end up rewriting the body — if we
+    // pass through untouched the body is byte-identical, and the gateway
+    // recomputing an unchanged length is harmless.
+    response.handler().remove_header(CONTENT_LENGTH_HEADER);
+
+    let body_state = response.into_body_state().await;
+    let handler = body_state.handler();
     let body = handler.body();
 
     let mut warned = |m: String| logger::warn!("[skill-governor] {}", m);
     match transform_card_body(&body, &ctx.variant, rules, ctx.surface, &ctx.identity, &mut warned) {
         Ok(None) => {} // pass through untouched
-        Ok(Some(new_body)) => write_body(handler, &new_body),
+        Ok(Some(new_body)) => set_body_or_log(handler, &new_body, "governed body"),
         Err(e) => {
             logger::error!("[skill-governor] failing closed on card shaping: {}", e);
-            send_fail_closed(handler, &ctx.variant);
+            // Body-only fail-closed: replace the card body with the error
+            // envelope; leave :status as the upstream committed it.
+            set_body_or_log(handler, &fail_closed_body(&ctx.variant), "fail-closed body");
         }
     }
 }

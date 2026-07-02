@@ -247,15 +247,16 @@ async fn empty_ruleset_returns_card_untouched() -> anyhow::Result<()> {
 // numeric `id`, which fails `Vec<Skill>` deserialization (Skill.id: String).
 // The policy MUST fail closed rather than ship an ungoverned card.
 //
-//   Public well-known  → HTTP 500
-//   Extended HTTP+JSON → HTTP 500
-//   Extended JSON-RPC  → HTTP 200 + JSON-RPC error.code == -32603
+// Fail-closed is BODY-ONLY (see fail_closed_body / response_filter docs): on the
+// split headers→body flow the HTTP status is committed before the body is read,
+// so the policy leaves :status as the upstream sent it (200 here) and replaces
+// only the body with the surface-appropriate error envelope. This is the
+// approved resolution to the Flex 1.12.1 combined-state hang (which produced a
+// 504 on every response-transforming request).
 //
-// This test is the authority on whether Envoy honours the `:status` rewrite
-// the policy issues from the combined headers-body state. If the two HTTP-500
-// assertions fail, that is a Task-6 defect (send_fail_closed cannot rewrite
-// status from ResponseHeadersBodyState) — the assertions stay spec-correct so
-// the defect stays visible.
+//   Public well-known  → HTTP 200 + plain-JSON error body
+//   Extended HTTP+JSON → HTTP 200 + google.rpc.Status-shaped error body
+//   Extended JSON-RPC  → HTTP 200 + JSON-RPC error.code == -32603
 // ===========================================================================
 
 /// A body that passes `is_agent_card` (skills is an array) but fails skill
@@ -268,29 +269,47 @@ fn malformed_skill_card() -> Value {
 }
 
 #[pdk_test]
-async fn fail_closed_public_well_known_returns_500() -> anyhow::Result<()> {
+async fn fail_closed_public_well_known_replaces_body() -> anyhow::Result<()> {
     let (_c, url, mock) = setup_test(deny_secret_cfg()).await?;
     mock_well_known(&mock, malformed_skill_card()).await;
 
     let resp = get_well_known(&url).await?;
+    // Body-only fail-closed: status is left as the upstream sent it (200).
     assert_eq!(
         resp.status(),
-        500,
-        "public well-known must fail closed with HTTP 500"
+        200,
+        "public well-known fail-closed leaves upstream status (body-only)"
+    );
+    let body: Value = resp.json().await?;
+    // The ungoverned card body was replaced by the plain-JSON error envelope —
+    // no skills[] leaks through.
+    assert!(body.get("skills").is_none(), "ungoverned card must not leak");
+    assert!(
+        body.get("error").is_some(),
+        "public fail-closed body carries a plain JSON error"
     );
     Ok(())
 }
 
 #[pdk_test]
-async fn fail_closed_extended_httpjson_returns_500() -> anyhow::Result<()> {
+async fn fail_closed_extended_httpjson_replaces_body() -> anyhow::Result<()> {
     let (_c, url, mock) = setup_test(deny_secret_cfg()).await?;
     mock_ext_httpjson(&mock, malformed_skill_card()).await;
 
     let resp = get_ext_httpjson(&url).await?;
+    // Body-only fail-closed: status is left as the upstream sent it (200).
     assert_eq!(
         resp.status(),
-        500,
-        "extended HTTP+JSON must fail closed with HTTP 500"
+        200,
+        "extended HTTP+JSON fail-closed leaves upstream status (body-only)"
+    );
+    let body: Value = resp.json().await?;
+    // google.rpc.Status-shaped error body; error.code is a payload field (500),
+    // not the HTTP status. No card skills[] leaks.
+    assert!(body.get("skills").is_none(), "ungoverned card must not leak");
+    assert_eq!(
+        body["error"]["code"], 500,
+        "google.rpc.Status-shaped body carries error.code 500 as a payload field"
     );
     Ok(())
 }
