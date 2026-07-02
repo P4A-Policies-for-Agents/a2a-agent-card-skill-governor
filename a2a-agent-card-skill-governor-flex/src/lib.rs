@@ -6,6 +6,7 @@
 //! Reshapes the `skills[]` array of an A2A Agent Card in-flight, per caller
 //! identity (extended card) or globally (public card).
 
+mod a2a;
 mod generated;
 
 use anyhow::{anyhow, Result};
