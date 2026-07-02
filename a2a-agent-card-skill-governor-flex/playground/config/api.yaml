@@ -1,0 +1,40 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: ApiInstance
+metadata:
+  name: ingress-http
+spec:
+  address: http://0.0.0.0:8185
+  services:
+    upstream:
+      address: "http://backend"
+      routes:
+        - config:
+            destinationPath: /
+  policies:
+    - policyRef:
+        name: a-two-a-agent-card-skill-governor-flex-v0-1
+        namespace: default
+      config:
+        # Default allow when no visibility rule matches a skill.
+        defaultAllow: true
+        # Authentication custom-property key carrying the caller's scope(s).
+        scopeClaimKey: scope
+        # Ordered allow/deny rules — first match per skill wins.
+        visibility:
+          # Hide the "secret" skill from everyone (public + extended).
+          - effect: deny
+            audienceType: any
+            skillId: secret
+          # Hide any skill whose id starts with "admin." unless overridden above.
+          - effect: deny
+            audienceType: any
+            skillIdPattern: "admin.*"
+        # Rewrite an existing skill or inject a new one, keyed by skill.id.
+        skills:
+          - audienceType: any
+            skill:
+              id: search
+              description: "Search the knowledge base (governed description)"

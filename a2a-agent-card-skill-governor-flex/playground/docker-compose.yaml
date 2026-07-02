@@ -1,0 +1,18 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+services:
+  local-flex:
+    image: mulesoft/flex-gateway:1.12.1
+    platform: linux/amd64
+    ports:
+      - 8185:8185
+    volumes:
+      - ./config:/usr/local/share/mulesoft/flex-gateway/conf.d/
+  # Static AgentCard backend. `mendhak/http-https-echo` echoes the request, so
+  # for a realistic card fetch the mock returns a fixed AgentCard JSON below via
+  # the `nginx` static file. We use httpbin as a simple stand-in upstream; point
+  # `upstream.address` at your real A2A agent to exercise a live card.
+  backend:
+    image: kennethreitz/httpbin
+    platform: linux/amd64

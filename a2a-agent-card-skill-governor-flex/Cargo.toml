@@ -1,0 +1,36 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+
+[package]
+name = "a_two_a_agent_card_skill_governor"
+version = "0.1.0"
+rust-version = "1.88.0"
+edition = "2021"
+resolver = "2"
+description = "A2A Agent Card Skill Governor policy for MuleSoft Omni Gateway"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib"]
+
+[package.metadata.anypoint]
+group_id = "00000000-0000-0000-0000-000000000000"
+definition_asset_id = { name = "a-two-a-agent-card-skill-governor", version = "0.1.0" }
+implementation_asset_id = "a-two-a-agent-card-skill-governor-flex"
+
+[dependencies]
+pdk = { version = "1.9.0" }
+serde = { version = "1.0", features = ["derive"] }
+serde_json = { version = "1.0", default-features = false, features = ["alloc"] }
+anyhow = "1.0"
+
+[dev-dependencies]
+pdk-test = { version = "1.9.0" }
+pdk-unit = { version = "1.9.0" }
+httpmock = "0.6"
+reqwest = { version = "0.11", features = ["json"] }
+
+[profile.release]
+lto = true
+opt-level = 'z'
+strip = "debuginfo"

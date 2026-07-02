@@ -1,0 +1,102 @@
+# Copyright 2026 Salesforce, Inc. All rights reserved.
+# SPDX-License-Identifier: Apache-2.0
+---
+apiVersion: gateway.mulesoft.com/v1alpha1
+kind: Extension
+metadata:
+  labels:
+    title: A2A Agent Card Skill Governor
+    description: Governs the skills[] of an A2A Agent Card in-flight per caller identity.
+    category: security
+    metadata/interfaceScope: api
+    metadata/capabilities/injectionPoint: outbound
+    metadata/capabilities/assetTypes: a2a,a2av1
+spec:
+  extends:
+    - name: extension-definition
+      namespace: default
+  properties:
+    scopeClaimKey:
+      type: string
+      title: Scope claim key
+      description: Authentication custom-property key that carries the caller's scope(s).
+      default: "scope"
+    defaultAllow:
+      type: boolean
+      title: Default allow
+      description: When no visibility rule matches a skill, allow it (true) or hide it (false).
+      default: true
+    visibility:
+      type: array
+      title: Visibility rules
+      description: Ordered allow/deny rules. First match per skill wins.
+      items:
+        type: object
+        properties:
+          effect:
+            type: string
+            title: Effect
+            enum: [allow, deny]
+          audienceType:
+            type: string
+            title: Audience type
+            enum: [any, client, scope, tier]
+          audienceValue:
+            type: string
+            title: Audience value
+          skillId:
+            type: string
+            title: Skill id (exact)
+          skillIdPattern:
+            type: string
+            title: Skill id pattern (glob)
+        required: [effect]
+    skills:
+      type: array
+      title: Skill upserts
+      description: Rewrite an existing skill or inject a new one, keyed by skill.id.
+      items:
+        type: object
+        properties:
+          audienceType:
+            type: string
+            title: Audience type
+            enum: [any, client, scope, tier]
+          audienceValue:
+            type: string
+            title: Audience value
+          skill:
+            type: object
+            title: Skill
+            properties:
+              id:
+                type: string
+                title: Skill id
+              name:
+                type: string
+                title: Name
+              description:
+                type: string
+                title: Description
+              tags:
+                type: array
+                title: Tags
+                items:
+                  type: string
+              examples:
+                type: array
+                title: Examples
+                items:
+                  type: string
+              inputModes:
+                type: array
+                title: Input modes
+                items:
+                  type: string
+              outputModes:
+                type: array
+                title: Output modes
+                items:
+                  type: string
+            required: [id]
+        required: [skill]

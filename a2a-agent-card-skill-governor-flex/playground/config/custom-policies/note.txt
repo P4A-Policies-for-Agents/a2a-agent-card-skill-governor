@@ -1,0 +1,3 @@
+Compiled custom-policy binaries are installed here by `make run`
+(via `anypoint-cli-v4 pdk install-policy`). This directory's contents are
+.gitignore'd except for this note.
