@@ -8,6 +8,7 @@
 
 mod a2a;
 mod generated;
+mod governor;
 
 use anyhow::{anyhow, Result};
 use pdk::hl::*;
