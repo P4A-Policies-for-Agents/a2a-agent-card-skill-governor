@@ -22,7 +22,9 @@ use pdk::hl::*;
 use pdk::logger;
 use pdk::script::PayloadBinding;
 use serde::Deserialize;
+use serde_json::Value;
 
+use crate::a2a::{is_agent_card, Skill};
 use crate::detect::{classify_surface, Variant};
 use crate::generated::config::Config;
 use crate::governor::{GovernorRules, Identity, Surface};
@@ -33,6 +35,12 @@ const A2A_VERSION_HEADER: &str = "A2A-Version";
 const A2A_VERSION_QUERY_KEY: &str = "a2a-version";
 const A2A_VERSION_V1: &str = "1.0";
 const PATH_PSEUDO_HEADER: &str = ":path";
+const STATUS_PSEUDO_HEADER: &str = ":status";
+const CONTENT_LENGTH_HEADER: &str = "content-length";
+const JSON_CONTENT_TYPE: &str = "application/json";
+/// JSON-RPC internal-error code (spec §7): fail-closed shaping errors on the
+/// JSON-RPC bindings surface here, at HTTP 200 (JSON-RPC in-band convention).
+const JSONRPC_INTERNAL_ERROR: i32 = -32603;
 
 /// Everything the response filter needs to reshape the card: which surface it
 /// is (public vs extended), which wire binding produced it, and — for the
@@ -196,14 +204,183 @@ async fn request_filter(
     }))
 }
 
-/// Response filter stub — the card-reshaping body lands in Task 6. For now it
-/// accepts the threaded [`CardContext`] and the compiled rules but passes the
-/// response through unchanged.
+/// Pure card transform. Locates the AgentCard in a response body, governs its
+/// `skills[]`, and returns the reshaped body.
+///
+/// Return contract:
+/// - `Ok(None)`       — pass the response through untouched. Covers non-JSON
+///   bodies, JSON-RPC error envelopes, and confirmed non-card payloads.
+/// - `Ok(Some(bytes))` — the governed body to write back.
+/// - `Err(_)`         — a failure *after* the body was confirmed to be a card
+///   (missing `skills[]`, unparseable skills, serialize failure). The caller
+///   MUST fail closed rather than ship an ungoverned card.
+///
+/// Pure over its inputs (no PDK I/O), so it is exhaustively unit-testable
+/// without a gateway harness. All gateway I/O lives in [`response_filter`].
+fn transform_card_body(
+    body: &[u8],
+    variant: &Variant,
+    rules: &GovernorRules,
+    surface: Surface,
+    id: &Identity,
+    warn: &mut dyn FnMut(String),
+) -> Result<Option<Vec<u8>>> {
+    let mut root: Value = match serde_json::from_slice(body) {
+        Ok(v) => v,
+        Err(_) => return Ok(None), // not JSON → not our target
+    };
+
+    // JSON-RPC bindings wrap the card in `result`; an `error` envelope means the
+    // upstream already failed — pass it through untouched. HTTP+JSON / public
+    // bindings carry the card as the top-level object.
+    let is_rpc = matches!(variant, Variant::Legacy | Variant::V1JsonRpc);
+
+    // Decide, on an immutable borrow, whether this response even holds a card.
+    {
+        let card_ref = if is_rpc {
+            if root.get("error").is_some() {
+                return Ok(None); // upstream JSON-RPC error → pass through
+            }
+            match root.get("result") {
+                Some(r) => r,
+                None => return Ok(None), // no result to shape
+            }
+        } else {
+            &root
+        };
+        if !is_agent_card(card_ref) {
+            return Ok(None); // confirmed non-card → pass through
+        }
+    }
+
+    // From here the body IS a card: any failure is fail-closed (Err).
+    // Take a mutable handle to the card object without `unwrap()`.
+    let card = if is_rpc {
+        root.get_mut("result")
+            .ok_or_else(|| anyhow!("card result vanished after detection"))?
+    } else {
+        &mut root
+    };
+
+    let skills_val = card
+        .get_mut("skills")
+        .ok_or_else(|| anyhow!("card lost skills[]"))?;
+    let skills: Vec<Skill> = serde_json::from_value(skills_val.take())
+        .map_err(|e| anyhow!("skills[] not a skill array: {}", e))?;
+    let governed = rules.govern(skills, surface, id, warn);
+    *skills_val =
+        serde_json::to_value(&governed).map_err(|e| anyhow!("serialize skills: {}", e))?;
+
+    let out = serde_json::to_vec(&root).map_err(|e| anyhow!("serialize card: {}", e))?;
+    Ok(Some(out))
+}
+
+/// Build the surface-appropriate fail-closed error body (spec §7):
+/// - JSON-RPC bindings (`Legacy`/`V1JsonRpc`): a JSON-RPC `-32603 INTERNAL`
+///   envelope — HTTP status stays 200 by JSON-RPC in-band convention.
+/// - `V1HttpJson`: a `google.rpc.Status` body at HTTP 500.
+/// - `PublicGet`: a plain JSON error at HTTP 500.
+///
+/// Returns `(status, body_bytes)`. Never blocks on serialization: falls back to
+/// a static minimal body if the (fixed, tiny) error object somehow fails to
+/// serialize, so the fail-closed path itself cannot panic.
+fn fail_closed_body(variant: &Variant) -> (u32, Vec<u8>) {
+    const MESSAGE: &str = "Agent Card could not be governed";
+    match variant {
+        Variant::Legacy | Variant::V1JsonRpc => {
+            let body = serde_json::json!({
+                "jsonrpc": "2.0",
+                "id": Value::Null,
+                "error": { "code": JSONRPC_INTERNAL_ERROR, "message": MESSAGE }
+            });
+            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+                br#"{"jsonrpc":"2.0","id":null,"error":{"code":-32603,"message":"Agent Card could not be governed"}}"#.to_vec()
+            });
+            (200, bytes)
+        }
+        Variant::V1HttpJson => {
+            let body = serde_json::json!({
+                "error": {
+                    "code": 500,
+                    "message": MESSAGE,
+                    "details": [{
+                        "@type": "type.googleapis.com/google.rpc.ErrorInfo",
+                        "reason": "INTERNAL",
+                        "domain": "a2a-protocol.org"
+                    }]
+                }
+            });
+            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+                br#"{"error":{"code":500,"message":"Agent Card could not be governed"}}"#.to_vec()
+            });
+            (500, bytes)
+        }
+        Variant::PublicGet => {
+            let body = serde_json::json!({ "error": MESSAGE });
+            let bytes = serde_json::to_vec(&body).unwrap_or_else(|_| {
+                br#"{"error":"Agent Card could not be governed"}"#.to_vec()
+            });
+            (500, bytes)
+        }
+    }
+}
+
+/// Overwrite the response body with `body`, keeping `content-length` consistent.
+/// A stale `content-length` after a body swap truncates or corrupts the response,
+/// so it is set to the new byte length. On a body-less flow `set_body` returns
+/// `BodyNotSent`; the card fetch always has a body, but we log and give up rather
+/// than panic if it does not.
+fn write_body(handler: &dyn HeadersBodyHandler, body: &[u8]) {
+    if let Err(e) = handler.set_body(body) {
+        logger::error!("[skill-governor] failed to write governed body: {}", e);
+        return;
+    }
+    handler.set_header(CONTENT_LENGTH_HEADER, &body.len().to_string());
+}
+
+/// Replace the response with the surface-appropriate fail-closed error, updating
+/// the `:status` pseudo-header, `content-type`, body, and `content-length`.
+fn send_fail_closed(handler: &dyn HeadersBodyHandler, variant: &Variant) {
+    let (status, body) = fail_closed_body(variant);
+    if let Err(e) = handler.set_body(&body) {
+        logger::error!("[skill-governor] failed to write fail-closed body: {}", e);
+        return;
+    }
+    handler.set_header(STATUS_PSEUDO_HEADER, &status.to_string());
+    handler.set_header(CONTENT_TYPE_HEADER, JSON_CONTENT_TYPE);
+    handler.set_header(CONTENT_LENGTH_HEADER, &body.len().to_string());
+}
+
+/// Response filter: when the request filter flagged this as a card fetch,
+/// reshape the card's `skills[]` and write it back. Fails closed — replacing the
+/// card with a surface-appropriate error — if a confirmed card cannot be shaped.
+///
+/// Uses the stop-iteration headers+body state (`enable_stop_iteration`) so the
+/// body can be read and, on the fail-closed path, the `:status` pseudo-header
+/// rewritten in the same pass — response body state alone cannot alter status.
 async fn response_filter(
-    _response_state: ResponseState,
-    _request_data: RequestData<Option<CardContext>>,
-    _rules: &GovernorRules,
+    response_state: ResponseState,
+    request_data: RequestData<Option<CardContext>>,
+    rules: &GovernorRules,
 ) {
+    let ctx = match request_data {
+        RequestData::Continue(Some(ctx)) => ctx,
+        _ => return, // not a card fetch → pass through
+    };
+
+    let state = response_state.into_headers_body_state().await;
+    let handler = state.handler();
+    let body = handler.body();
+
+    let mut warned = |m: String| logger::warn!("[skill-governor] {}", m);
+    match transform_card_body(&body, &ctx.variant, rules, ctx.surface, &ctx.identity, &mut warned) {
+        Ok(None) => {} // pass through untouched
+        Ok(Some(new_body)) => write_body(handler, &new_body),
+        Err(e) => {
+            logger::error!("[skill-governor] failing closed on card shaping: {}", e);
+            send_fail_closed(handler, &ctx.variant);
+        }
+    }
 }
 
 #[entrypoint]
@@ -228,4 +405,86 @@ async fn configure(launcher: Launcher, Configuration(bytes): Configuration) -> R
         .on_response(|rs, rd| response_filter(rs, rd, &rules));
     launcher.launch(filter).await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod resp_tests {
+    use super::*;
+    use crate::detect::Variant;
+    use crate::generated::config::*;
+    use crate::governor::{GovernorRules, Identity, Surface};
+
+    fn deny_all_rules() -> GovernorRules {
+        let c = Config {
+            scope_claim_key: None,
+            default_allow: Some(false),
+            visibility: Some(vec![]),
+            skills: Some(vec![]),
+        };
+        GovernorRules::compile(&c, &mut |_| {})
+    }
+
+    #[test]
+    fn public_card_body_skills_removed() {
+        let body = br#"{"name":"A","skills":[{"id":"a","name":"A"}]}"#;
+        let out = transform_card_body(
+            body,
+            &Variant::PublicGet,
+            &deny_all_rules(),
+            Surface::Public,
+            &Identity::default(),
+            &mut |_| {},
+        )
+        .unwrap()
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["skills"].as_array().unwrap().len(), 0);
+        assert_eq!(v["name"], "A"); // untouched
+    }
+
+    #[test]
+    fn jsonrpc_error_passes_through() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"error":{"code":-32601,"message":"x"}}"#;
+        let r = transform_card_body(
+            body,
+            &Variant::V1JsonRpc,
+            &deny_all_rules(),
+            Surface::Extended,
+            &Identity::default(),
+            &mut |_| {},
+        );
+        assert!(matches!(r, Ok(None))); // None => pass through untouched
+    }
+
+    #[test]
+    fn non_card_passes_through() {
+        let body = br#"{"jsonrpc":"2.0","id":1,"result":{"foo":"bar"}}"#;
+        let r = transform_card_body(
+            body,
+            &Variant::V1JsonRpc,
+            &deny_all_rules(),
+            Surface::Extended,
+            &Identity::default(),
+            &mut |_| {},
+        );
+        assert!(matches!(r, Ok(None)));
+    }
+
+    #[test]
+    fn jsonrpc_result_card_governed_and_rewrapped() {
+        let body = br#"{"jsonrpc":"2.0","id":7,"result":{"name":"A","skills":[{"id":"a"}]}}"#;
+        let out = transform_card_body(
+            body,
+            &Variant::V1JsonRpc,
+            &deny_all_rules(),
+            Surface::Extended,
+            &Identity::default(),
+            &mut |_| {},
+        )
+        .unwrap()
+        .unwrap();
+        let v: serde_json::Value = serde_json::from_slice(&out).unwrap();
+        assert_eq!(v["id"], 7); // envelope preserved
+        assert_eq!(v["result"]["skills"].as_array().unwrap().len(), 0);
+    }
 }
