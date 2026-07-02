@@ -89,7 +89,7 @@ If neither `skillId` nor `skillIdPattern` is set, the rule matches **all** skill
 - On the **public** surface, any identity-typed rule → never matches (no identity available).
 - `client` → matches when `audienceValue` equals the caller's `client_id` **or** `client_name`.
 - `scope` → matches when `audienceValue` is one of the caller's scopes.
-- `tier` → matches when `audienceValue` equals the caller's SLA tier.
+- `tier` → matches when `audienceValue` equals the caller's SLA tier. The tier is read from the `Authentication` custom property `sla-tier-name` (the human tier name, e.g. `Gold`), which the SLA-based rate-limiting policy propagates; `sla-tier-id` and legacy spellings are also accepted. Requires an upstream SLA-tier policy in the chain — otherwise `tier` rules never match.
 
 ### Skills upsert entry
 
