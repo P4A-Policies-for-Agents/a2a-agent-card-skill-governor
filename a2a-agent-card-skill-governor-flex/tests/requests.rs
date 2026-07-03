@@ -334,43 +334,54 @@ async fn fail_closed_extended_jsonrpc_returns_internal_error() -> anyhow::Result
 }
 
 // ===========================================================================
-// Carried tier-key confirmation — a tier-audience rule driven over a live
-// request. Confirms whether the `Authentication` injectable in the integration
-// harness carries an SLA tier the policy can read (probed keys:
-// ["tier","sla_tier","slaTier"]).
+// Case 12 — Surface split: deny surface=public any skillId=secret.
 //
-// The pdk-integration-tests harness (FlexConfig/ApiConfig) applies only THIS
-// policy — there is no upstream SLA-tier / client-credential policy in the
-// chain, and no client application contract, so nothing populates the
-// `Authentication` injectable's custom properties with a tier. This test
-// therefore documents the harness limitation rather than confirming the key
-// spelling: with no tier present, the tier rule degrades to no-op and the skill
-// survives (default_allow = true). We assert that graceful-degradation
-// behaviour — NOT a synthesized/faked tier. See task-7-report.md for the
-// tier-key confirmation outcome.
+// The headline surface-axis use case: a skill is hidden on the anonymous public
+// well-known card but exposed on the authenticated extended card. Same ruleset,
+// two surfaces, opposite outcomes — proving the `surface` axis gates disclosure
+// per surface (disclosure ≠ authorization; an upstream auth policy still guards
+// the extended endpoint). `audienceType: any` fires on both surfaces, so the
+// public/extended split is enforced solely by the new `surface` gate.
 // ===========================================================================
 
-#[pdk_test]
-async fn tier_rule_degrades_gracefully_without_injected_tier() -> anyhow::Result<()> {
-    let cfg = json!({
+/// Deny the `secret` skill on the PUBLIC surface only (any audience).
+fn deny_secret_public_only_cfg() -> Value {
+    json!({
         "visibility": [
-            { "effect": "deny", "audienceType": "tier", "audienceValue": "gold", "skillId": "search" }
+            { "effect": "deny", "audienceType": "any", "surface": "public", "skillId": "secret" }
         ]
-    });
-    let (_c, url, mock) = setup_test(cfg).await?;
-    // Extended surface (identity rules only bind here), but no auth policy in
-    // the chain means Identity.tier is None → the tier rule cannot match.
-    mock_ext_jsonrpc(&mock, json!(1), agent_card(vec![skill("search", "Search")])).await;
+    })
+}
 
-    let resp = post_ext_jsonrpc(&url, json!(1)).await?;
+#[pdk_test]
+async fn surface_public_rule_hides_only_on_public_card() -> anyhow::Result<()> {
+    let (_c, url, mock) = setup_test(deny_secret_public_only_cfg()).await?;
+    mock_well_known(&mock, three_skill_card()).await;
+
+    let resp = get_well_known(&url).await?;
     assert_eq!(resp.status(), 200);
     let body: Value = resp.json().await?;
+    let ids = skill_ids(&body);
+    // surface=public → the rule binds on the public well-known card.
+    assert!(!ids.contains(&"secret".to_string()), "secret hidden on public card");
+    assert!(ids.contains(&"search".to_string()));
+    assert!(ids.contains(&"report".to_string()));
+    Ok(())
+}
+
+#[pdk_test]
+async fn surface_public_rule_no_op_on_extended_card() -> anyhow::Result<()> {
+    let (_c, url, mock) = setup_test(deny_secret_public_only_cfg()).await?;
+    mock_ext_jsonrpc(&mock, json!("rpc-surface"), three_skill_card()).await;
+
+    let resp = post_ext_jsonrpc(&url, json!("rpc-surface")).await?;
+    assert_eq!(resp.status(), 200);
+    let body: Value = resp.json().await?;
+    assert_eq!(body["id"], "rpc-surface", "JSON-RPC id preserved");
     let ids = skill_ids(&body["result"]);
-    // Tier unmatched → default_allow keeps the skill. This proves the multi-key
-    // probe degrades to None safely; it does NOT confirm the tier-key spelling.
-    assert!(
-        ids.contains(&"search".to_string()),
-        "tier rule must no-op when no tier is present in Authentication"
-    );
+    // surface=public → the rule does NOT bind on the extended card; secret shows.
+    assert!(ids.contains(&"secret".to_string()), "secret exposed on extended card");
+    assert!(ids.contains(&"search".to_string()));
+    assert!(ids.contains(&"report".to_string()));
     Ok(())
 }

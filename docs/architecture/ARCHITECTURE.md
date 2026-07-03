@@ -112,11 +112,23 @@ query). The V1 JSON-RPC method name seen *without* the V1 signal degrades to
 fail-closed at load only if the whole config fails to parse). `GovernorRules::govern`
 runs per confirmed card, in two ordered stages.
 
+A rule fires on a skill only when **all three** axes match: **surface AND audience
+AND target** (`CompiledVis`/`CompiledUpsert` each carry a `surface: RuleSurface`
+alongside `audience` and `target`).
+
+**Surface matching** (`RuleSurface::matches`): `Any` ⇒ true on both surfaces;
+`Public` ⇒ true only on `Surface::Public`; `Extended` ⇒ true only on
+`Surface::Extended`. Compiled from the optional config `surface` string
+(`compile_surface`): omitted / `any` ⇒ `Any`, `public` ⇒ `Public`, `extended` ⇒
+`Extended`, unknown ⇒ WARN + `Any` (lenient). Surface is **orthogonal** to
+audience: `surface: extended` + `audienceType: any` = "any authenticated caller",
+the case identity types alone could not express.
+
 **Audience matching** (`Audience::matches`): `any` ⇒ always true; on the **public
-surface any identity-typed audience (`client`/`scope`/`tier`) is false** (no-op);
+surface any identity-typed audience (`client`/`scope`) is false** (no-op);
 otherwise `client` matches `client_id` **or** `client_name`, `scope` matches
-membership in `identity.scopes`, `tier` matches `identity.tier`. Absent `audienceType`
-defaults to `any` (applies to everyone, including anonymous).
+membership in `identity.scopes`. Absent `audienceType` defaults to `any` (applies
+to everyone, including anonymous).
 
 **Skill targeting** (`Target`): `skillId` ⇒ exact; else `skillIdPattern` ⇒ `*`/`?`
 glob (in-crate matcher, no external crate; every string is a valid pattern —
@@ -126,13 +138,13 @@ all skills (global rule).
 ### Stage 1 — Visibility gate (first-match, per skill)
 For each upstream skill, the verdict starts at `defaultAllow` (default `true`).
 Visibility rules are scanned in declaration order; the **first** rule whose
-audience and target both match sets the verdict (`allow`/`deny`) and stops the
-scan. The skill is kept iff the verdict is allow. Denied ids are recorded (to warn
+surface, audience, and target all match sets the verdict (`allow`/`deny`) and
+stops the scan. The skill is kept iff the verdict is allow. Denied ids are recorded (to warn
 on later deny-then-reinject). Setting `defaultAllow: false` turns the ruleset into
 a strict allow-list.
 
 ### Stage 2 — Skill upsert (layered, on survivors)
-For each upsert entry whose audience matches, keyed by `skill.id`:
+For each upsert entry whose surface and audience match, keyed by `skill.id`:
 - **Rewrite** — id found among survivors: each provided field overrides the
   existing one. **Array fields (`tags`/`examples`/`inputModes`/`outputModes`) are
   replaced wholesale, never merged.**
@@ -157,13 +169,17 @@ parsing). Fields:
 | `client_id` | `AuthenticationData.client_id` |
 | `client_name` | `AuthenticationData.client_name` |
 | `scopes` | Custom property under the configurable `scopeClaimKey` (default `"scope"`); string is split on whitespace/commas, array-of-strings is flattened |
-| `tier` | **Custom-property channel** — first non-empty of `sla-tier-name`, `sla-tier-id`, `tier`, `sla_tier`, `slaTier` |
 
-**`tier` has no first-class `AuthenticationData` field.** The custom properties
-`sla-tier-name` / `sla-tier-id` are propagated by the SLA-tier rate-limiting
-policy (`rate_limit_sla`). Therefore `tier` audience rules **require an upstream
-SLA-tier policy**; absent it, `tier` degrades to `None` and `tier` rules never
-match. Missing fields degrade gracefully rather than failing.
+Missing fields degrade gracefully rather than failing.
+
+**SLA tier is not an audience.** An earlier design read an SLA tier from
+`Authentication` custom properties (`sla-tier-name` / `sla-tier-id`) as a
+`tier` audience. That coupled a rate-limit/SLA concept to disclosure control and
+depended on an upstream SLA policy propagating the property; it was removed in
+v0.2.0. The public/extended distinction it was sometimes used to approximate is
+now expressed directly by the orthogonal `surface` axis. A config still carrying
+`audienceType: tier` hits the "unknown audienceType ⇒ WARN + drop rule" path
+(soft removal — no hard failure); the rule simply stops firing.
 
 ## 7. Failure & security model
 

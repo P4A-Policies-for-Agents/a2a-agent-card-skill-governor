@@ -56,19 +56,33 @@ must be mirrored by hand into `src/generated/config.rs` (struct fields + serde a
    `unwrap_or_else` calls are on fixed static fallback bodies in `fail_closed_body`, so
    the fail-closed path itself cannot panic.
 
-## Identity & SLA tier
+## Identity
 
 Identity comes from the Anypoint `Authentication` injectable only (no raw token parsing).
 `AuthenticationData` exposes `principal`, `client_id`, `client_name`, and
-`properties: Value` — there is **no first-class tier field**. The caller's SLA tier is
-read from `properties` under `sla-tier-name` (human name, e.g. `Gold`) / `sla-tier-id`,
-which the SLA-based rate-limiting policy (`rate_limit_sla`) propagates; legacy spellings
-(`tier`/`sla_tier`/`slaTier`) are probed as fallbacks. `tier`-audience rules therefore
-require an upstream SLA-tier policy in the chain; absent it, tier is `None` and those
-rules never match (graceful degrade, no error).
+`properties: Value`. `read_identity` reads `client_id`, `client_name`, and scopes;
+`Identity` carries exactly those (`client_id`, `client_name`, `scopes`).
 
 Scope is read from the operator-configured `scopeClaimKey` (default `scope`) and accepts
 a string or an array of strings.
+
+**SLA tier was removed as an audience in v0.2.0.** An earlier design probed `properties`
+for an SLA tier (`sla-tier-name`/`sla-tier-id` plus legacy `tier`/`sla_tier`/`slaTier`
+fallbacks) to back an `audienceType: tier`. Using an SLA/rate-limit concept as a
+disclosure audience conflated two concerns and required an upstream SLA policy to
+populate the property. It is gone: `compile_audience` accepts only `any`/`client`/`scope`,
+and a lingering `audienceType: tier` falls into the "unknown audienceType ⇒ WARN + drop"
+path (soft, no hard failure).
+
+## Surface axis
+
+Both `VisibilityRule` and `SkillRule` carry an optional `surface` string (config.rs,
+hand-maintained) compiled by `compile_surface` into a `RuleSurface` (`Any`/`Public`/
+`Extended`) stored on `CompiledVis`/`CompiledUpsert`. `RuleSurface::matches(actual)`
+gates each rule against the request's detected `Surface` and is ANDed with audience and
+target in `govern()`. Omitted / `any` ⇒ both surfaces (backward-compatible); unknown
+value ⇒ WARN + `Any`. The axis is orthogonal to audience, so `surface: extended` +
+`audienceType: any` expresses "any authenticated caller".
 
 ## Testing notes
 
@@ -81,9 +95,12 @@ a string or an array of strings.
   outbound-injection policy.
 - `tests/config/registration.yaml` is device-local (gitignored) — another machine must
   supply its own before `make test`.
-- The `pdk-test` harness cannot inject a populated `Authentication`/SLA tier (no auth/SLA
-  policy in the mock chain), so `tier`-audience matching is not covered end-to-end by
-  integration tests; confirm it against a real deployment behind an SLA-tier policy.
+- The `pdk-test` harness cannot inject a populated `Authentication` (no auth policy in the
+  mock chain), so `client`/`scope`-audience matching is not covered end-to-end by
+  integration tests; confirm those against a real deployment behind an auth policy. The
+  `surface` axis IS covered end-to-end (`surface_public_rule_*` tests): the same
+  `surface: public` ruleset hides a skill on the well-known card and no-ops on the
+  extended card, since surface detection needs no identity.
 
 ## Local manual testing
 

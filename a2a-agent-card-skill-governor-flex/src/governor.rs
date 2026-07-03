@@ -17,7 +17,6 @@ pub enum Surface {
 pub struct Identity {
     pub client_id: Option<String>,
     pub client_name: Option<String>,
-    pub tier: Option<String>,
     pub scopes: Vec<String>,
 }
 
@@ -25,7 +24,26 @@ enum Audience {
     Any,
     Client(String),
     Scope(String),
-    Tier(String),
+}
+
+/// Which card surface a rule applies to (the orthogonal "where" axis, distinct
+/// from the "who" audience). `Any` fires on both surfaces (the default); the
+/// others gate the rule to a single surface.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum RuleSurface {
+    Any,
+    Public,
+    Extended,
+}
+
+impl RuleSurface {
+    fn matches(self, actual: Surface) -> bool {
+        match self {
+            RuleSurface::Any => true,
+            RuleSurface::Public => actual == Surface::Public,
+            RuleSurface::Extended => actual == Surface::Extended,
+        }
+    }
 }
 
 enum Target {
@@ -37,10 +55,12 @@ enum Target {
 struct CompiledVis {
     effect_allow: bool,
     audience: Audience,
+    surface: RuleSurface,
     target: Target,
 }
 struct CompiledUpsert {
     audience: Audience,
+    surface: RuleSurface,
     skill: SkillPayload,
 }
 
@@ -57,11 +77,10 @@ fn compile_audience(
 ) -> Option<Audience> {
     match at.unwrap_or("any") {
         "any" => Some(Audience::Any),
-        kind @ ("client" | "scope" | "tier") => match av {
+        kind @ ("client" | "scope") => match av {
             Some(v) if !v.is_empty() => Some(match kind {
                 "client" => Audience::Client(v.into()),
-                "scope" => Audience::Scope(v.into()),
-                _ => Audience::Tier(v.into()),
+                _ => Audience::Scope(v.into()),
             }),
             _ => {
                 warn(format!(
@@ -73,6 +92,21 @@ fn compile_audience(
         other => {
             warn(format!("unknown audienceType '{other}' — dropped"));
             None
+        }
+    }
+}
+
+/// Compile the optional `surface` axis. Absent or `any` → both surfaces; an
+/// unknown value is lenient (WARN + default `Any`), matching the soft posture of
+/// the rest of the config compiler.
+fn compile_surface(s: Option<&str>, warn: &mut dyn FnMut(String)) -> RuleSurface {
+    match s.unwrap_or("any") {
+        "any" => RuleSurface::Any,
+        "public" => RuleSurface::Public,
+        "extended" => RuleSurface::Extended,
+        other => {
+            warn(format!("unknown surface '{other}' — treated as any"));
+            RuleSurface::Any
         }
     }
 }
@@ -108,7 +142,6 @@ impl Audience {
                 id.client_id.as_deref() == Some(v) || id.client_name.as_deref() == Some(v)
             }
             Audience::Scope(v) => id.scopes.iter().any(|s| s == v),
-            Audience::Tier(v) => id.tier.as_deref() == Some(v),
         }
     }
 }
@@ -132,6 +165,7 @@ impl GovernorRules {
                 effect,
                 audience_type,
                 audience_value,
+                surface,
                 skill_id,
                 skill_id_pattern,
             } = r;
@@ -151,6 +185,7 @@ impl GovernorRules {
             visibility.push(CompiledVis {
                 effect_allow,
                 audience,
+                surface: compile_surface(surface.as_deref(), warn),
                 target: compile_target(skill_id.as_deref(), skill_id_pattern.as_deref()),
             });
         }
@@ -159,6 +194,7 @@ impl GovernorRules {
             let SkillRule {
                 audience_type,
                 audience_value,
+                surface,
                 skill,
             } = r;
             if skill.id.is_empty() {
@@ -172,6 +208,7 @@ impl GovernorRules {
             };
             upserts.push(CompiledUpsert {
                 audience,
+                surface: compile_surface(surface.as_deref(), warn),
                 skill: skill.clone(),
             });
         }
@@ -196,7 +233,10 @@ impl GovernorRules {
             .filter(|s| {
                 let mut verdict = self.default_allow;
                 for r in &self.visibility {
-                    if r.audience.matches(surface, id) && r.target.matches(&s.id) {
+                    if r.surface.matches(surface)
+                        && r.audience.matches(surface, id)
+                        && r.target.matches(&s.id)
+                    {
                         verdict = r.effect_allow;
                         break;
                     }
@@ -210,7 +250,7 @@ impl GovernorRules {
 
         // 2. Skill upsert — layered, declaration order.
         for u in &self.upserts {
-            if !u.audience.matches(surface, id) {
+            if !u.surface.matches(surface) || !u.audience.matches(surface, id) {
                 continue;
             }
             match survivors.iter_mut().find(|s| s.id == u.skill.id) {
@@ -303,7 +343,19 @@ mod tests {
             effect: effect.into(),
             audience_type: Some(at.into()),
             audience_value: av.map(Into::into),
+            surface: None,
             skill_id: sid.map(Into::into),
+            skill_id_pattern: None,
+        }
+    }
+    /// Visibility rule scoped to a specific surface (`public`/`extended`/`any`).
+    fn vis_surface(effect: &str, at: &str, surface: &str, sid: &str) -> VisibilityRule {
+        VisibilityRule {
+            effect: effect.into(),
+            audience_type: Some(at.into()),
+            audience_value: None,
+            surface: Some(surface.into()),
+            skill_id: Some(sid.into()),
             skill_id_pattern: None,
         }
     }
@@ -410,6 +462,7 @@ mod tests {
         let sr = SkillRule {
             audience_type: Some("any".into()),
             audience_value: None,
+            surface: None,
             skill: SkillPayload {
                 id: "a".into(),
                 name: Some("New".into()),
@@ -435,6 +488,7 @@ mod tests {
         let sr = SkillRule {
             audience_type: Some("any".into()),
             audience_value: None,
+            surface: None,
             skill: SkillPayload {
                 id: "new".into(),
                 name: Some("N".into()),
@@ -460,6 +514,7 @@ mod tests {
         let sr = SkillRule {
             audience_type: Some("any".into()),
             audience_value: None,
+            surface: None,
             skill: SkillPayload {
                 id: "bad".into(),
                 name: None,
@@ -498,6 +553,117 @@ mod tests {
         assert_eq!(
             out.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
             vec!["user.read"]
+        );
+    }
+
+    #[test]
+    fn surface_public_rule_only_fires_on_public() {
+        // deny surface=public, any: removed on the public card, kept on extended.
+        let c = cfg(
+            vec![vis_surface("deny", "any", "public", "a")],
+            vec![],
+            true,
+        );
+        let mut w = nowarn();
+        let g = GovernorRules::compile(&c, &mut w);
+
+        let pub_out = g.govern(vec![skill("a")], Surface::Public, &anon(), &mut w);
+        assert!(
+            pub_out.is_empty(),
+            "public rule must remove skill on public"
+        );
+
+        let ext_out = g.govern(vec![skill("a")], Surface::Extended, &anon(), &mut w);
+        assert_eq!(ext_out.len(), 1, "public rule must not fire on extended");
+    }
+
+    #[test]
+    fn surface_extended_any_fires_only_on_extended() {
+        // The headline case: hide from the public card, expose to ANY caller on
+        // the extended card. deny surface=extended, audienceType=any.
+        let c = cfg(
+            vec![vis_surface("deny", "any", "extended", "a")],
+            vec![],
+            true,
+        );
+        let mut w = nowarn();
+        let g = GovernorRules::compile(&c, &mut w);
+
+        let pub_out = g.govern(vec![skill("a")], Surface::Public, &anon(), &mut w);
+        assert_eq!(pub_out.len(), 1, "extended rule must not fire on public");
+
+        let ext_out = g.govern(vec![skill("a")], Surface::Extended, &anon(), &mut w);
+        assert!(
+            ext_out.is_empty(),
+            "extended rule must remove skill on extended for any caller"
+        );
+    }
+
+    #[test]
+    fn surface_omitted_applies_to_both() {
+        // No surface field → rule fires on both surfaces (backward-compatible).
+        let c = cfg(vec![vis("deny", "any", None, Some("a"))], vec![], true);
+        let mut w = nowarn();
+        let g = GovernorRules::compile(&c, &mut w);
+        assert!(g
+            .govern(vec![skill("a")], Surface::Public, &anon(), &mut w)
+            .is_empty());
+        assert!(g
+            .govern(vec![skill("a")], Surface::Extended, &anon(), &mut w)
+            .is_empty());
+    }
+
+    #[test]
+    fn tier_audience_type_is_dropped_with_warn() {
+        // `tier` was removed as an audience: the rule is dropped at compile with a
+        // WARN, so the skill is unaffected (no rule fires).
+        let c = cfg(
+            vec![vis("deny", "tier", Some("gold"), Some("a"))],
+            vec![],
+            true,
+        );
+        let mut warnings = Vec::new();
+        let g = GovernorRules::compile(&c, &mut |m| warnings.push(m));
+        let out = g.govern(vec![skill("a")], Surface::Extended, &anon(), &mut nowarn());
+        assert_eq!(out.len(), 1, "dropped tier rule must not remove the skill");
+        assert!(
+            warnings.iter().any(|m| m.contains("tier")),
+            "expected a WARN naming the unknown 'tier' audienceType"
+        );
+    }
+
+    #[test]
+    fn upsert_surface_extended_injects_only_on_extended() {
+        let sr = SkillRule {
+            audience_type: Some("any".into()),
+            audience_value: None,
+            surface: Some("extended".into()),
+            skill: SkillPayload {
+                id: "ext-only".into(),
+                name: Some("Ext Only".into()),
+                description: Some("visible on the extended card only".into()),
+                tags: None,
+                examples: None,
+                input_modes: None,
+                output_modes: None,
+            },
+        };
+        let c = cfg(vec![], vec![sr], true);
+        let mut w = nowarn();
+        let g = GovernorRules::compile(&c, &mut w);
+
+        let pub_out = g.govern(vec![skill("a")], Surface::Public, &anon(), &mut w);
+        assert_eq!(
+            pub_out.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            vec!["a"],
+            "extended-scoped upsert must not inject on the public card"
+        );
+
+        let ext_out = g.govern(vec![skill("a")], Surface::Extended, &anon(), &mut w);
+        assert_eq!(
+            ext_out.iter().map(|s| s.id.clone()).collect::<Vec<_>>(),
+            vec!["a", "ext-only"],
+            "extended-scoped upsert must inject on the extended card"
         );
     }
 }

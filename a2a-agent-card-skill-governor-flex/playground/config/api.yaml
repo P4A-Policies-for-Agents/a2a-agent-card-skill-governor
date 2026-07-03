@@ -28,7 +28,7 @@ spec:
       # ... because it is of kind ApiInstance".
       policies:
         - policyRef:
-            name: a-two-a-agent-card-skill-governor-flex-v0-1
+            name: a-two-a-agent-card-skill-governor-flex-v0-2
             namespace: default
           config:
             # Default allow when no visibility rule matches a skill.

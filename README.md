@@ -6,7 +6,7 @@ Built with the [Policy Development Kit (PDK)](https://docs.mulesoft.com/pdk/late
 
 ## Focus
 
-An A2A Agent Card is the agent's public résumé: it advertises the `skills[]` the agent can perform, and clients read it to decide what to invoke. The upstream agent authors one card, but not every caller should see the same skill set — an internal `admin.reindex` skill has no business appearing on the unauthenticated public card, a premium capability may belong only to a `gold`-tier client, and an operator may want to publish a governed description in place of the agent's own.
+An A2A Agent Card is the agent's public résumé: it advertises the `skills[]` the agent can perform, and clients read it to decide what to invoke. The upstream agent authors one card, but not every caller should see the same skill set — an internal `admin.reindex` skill has no business appearing on the unauthenticated public card, a capability may be hidden on the public card yet revealed to any authenticated caller on the extended card, and an operator may want to publish a governed description in place of the agent's own.
 
 This policy is the **skill-disclosure control point at the A2A perimeter**. It intercepts the card on its way back to the caller and applies two mechanisms (the "hybrid" rule model):
 
@@ -15,7 +15,8 @@ This policy is the **skill-disclosure control point at the A2A perimeter**. It i
 
 Key properties:
 
-- **Identity comes from the Anypoint `Authentication` injectable only.** The policy never parses a raw token. `client_id`, `client_name`, `tier`, and `scope` are read from the authentication data set by an upstream auth/contract policy. Scope is read from a configurable custom-property key (`scopeClaimKey`).
+- **Identity comes from the Anypoint `Authentication` injectable only.** The policy never parses a raw token. `client_id`, `client_name`, and `scope` are read from the authentication data set by an upstream auth/contract policy. Scope is read from a configurable custom-property key (`scopeClaimKey`).
+- **Per-surface disclosure via `surface`.** Both visibility rules and upsert entries take an optional `surface` axis (`any` / `public` / `extended`, default `any`) — orthogonal to audience — so an operator can hide a skill on the anonymous public card while exposing it to any authenticated caller on the extended card, or vice versa. This is still disclosure control, not authorization (see the box below).
 - **Three card surfaces, one behavior.** The same `AgentCard` shape is governed regardless of the wire binding it arrives on (see the surfaces table below).
 - **Empty ruleset ⇒ full passthrough.** With no `visibility` and no `skills` rules configured, the card is returned byte-faithful — the policy is inert.
 - **Fail-closed is body-only.** If a confirmed card cannot be shaped, the card body is replaced with a surface-appropriate error envelope so ungoverned skills never leak. The HTTP status is left as the upstream sent it (see [Failure behavior](#failure-behavior)).
@@ -58,7 +59,7 @@ All three A2A card surfaces carry the same `AgentCard`; only its location in the
 Notes:
 
 - **V1 vs Legacy detection.** For the JSON-RPC extended card, the `A2A-Version: 1.0` signal (request header, or `?A2A-Version=1.0` query parameter) distinguishes the V1 binding (`GetExtendedAgentCard`) from Legacy (`agent/getAuthenticatedExtendedCard`). The V1 HTTP+JSON `GET /extendedAgentCard` binding requires the `A2A-Version: 1.0` signal.
-- **Identity no-ops on the public card.** The well-known card is fetched anonymously, so identity-scoped rules (`client`/`scope`/`tier`) cannot bind there — only `any`-audience rules apply.
+- **Identity no-ops on the public card.** The well-known card is fetched anonymously, so identity-scoped rules (`client`/`scope`) cannot bind there — only `any`-audience rules apply. Use the `surface` axis to draw the public/extended line explicitly regardless of audience.
 - **JSON responses only.** Card fetches are unary JSON; there is no `text/event-stream` / SSE handling, and the gRPC card binding is out of scope.
 - Any response that is not JSON, does not carry a `skills[]` array, or is a JSON-RPC `error` envelope passes through untouched.
 
@@ -78,24 +79,33 @@ Configuration is set on the policy binding (`api.yaml` locally, or the API Manag
 | Field | Type | Description |
 |---|---|---|
 | `effect` | `allow` \| `deny` | **Required.** What to do with a skill this rule matches. |
-| `audienceType` | `any` \| `client` \| `scope` \| `tier` | Who the rule applies to. Defaults to `any` (everyone, including anonymous). Identity types no-op on the public card. |
-| `audienceValue` | string | The value to match for a non-`any` audience (a `client_id`/`client_name`, a scope, or a tier). An identity audience with an empty value is dropped with a WARN at load. |
+| `audienceType` | `any` \| `client` \| `scope` | Who the rule applies to. Defaults to `any` (everyone, including anonymous). Identity types no-op on the public card. |
+| `audienceValue` | string | The value to match for a non-`any` audience (a `client_id`/`client_name` or a scope). An identity audience with an empty value is dropped with a WARN at load. |
+| `surface` | `any` \| `public` \| `extended` | Which card this rule applies to. Defaults to `any` (both). `public` = only the anonymous well-known card; `extended` = only the authenticated extended card. Orthogonal to `audienceType`. |
 | `skillId` | string | Match a single skill by exact `id`. |
 | `skillIdPattern` | string | Match skills by glob (`*` / `?`) against `id`. Used only when `skillId` is absent. |
 
-If neither `skillId` nor `skillIdPattern` is set, the rule matches **all** skills (a global gate). Audience matching:
+If neither `skillId` nor `skillIdPattern` is set, the rule matches **all** skills (a global gate). A rule fires on a skill only when **all three** axes match: `surface` **AND** `audienceType` **AND** the skill target (`skillId`/`skillIdPattern`).
 
-- `any` → always matches.
+Surface matching:
+
+- `any` (default / omitted) → matches on both the public and extended cards.
+- `public` → matches only on the anonymous well-known card.
+- `extended` → matches only on the authenticated extended card. Combined with `audienceType: any`, this expresses "any authenticated caller" — the previously-inexpressible case.
+
+Audience matching:
+
+- `any` → always matches (subject to the surface gate).
 - On the **public** surface, any identity-typed rule → never matches (no identity available).
 - `client` → matches when `audienceValue` equals the caller's `client_id` **or** `client_name`.
 - `scope` → matches when `audienceValue` is one of the caller's scopes.
-- `tier` → matches when `audienceValue` equals the caller's SLA tier. The tier is read from the `Authentication` custom property `sla-tier-name` (the human tier name, e.g. `Gold`), which the SLA-based rate-limiting policy propagates; `sla-tier-id` and legacy spellings are also accepted. Requires an upstream SLA-tier policy in the chain — otherwise `tier` rules never match.
 
 ### Skills upsert entry
 
 | Field | Type | Description |
 |---|---|---|
 | `audienceType` / `audienceValue` | (same as above) | Who this upsert applies to. Same matching rules. |
+| `surface` | `any` \| `public` \| `extended` | Which card this upsert applies to. Defaults to `any` (both). Same semantics as the visibility rule `surface`. |
 | `skill` | object | **Required.** The skill payload. `skill.id` is **required** and is the key. |
 
 The `skill` payload carries `id` (required) plus any of `name`, `description`, `tags[]`, `examples[]`, `inputModes[]`, `outputModes[]`. On a **rewrite**, each provided field overwrites the upstream skill's field; array fields are **replaced wholesale**, not merged; fields you omit are left untouched. On an **inject**, the entry becomes a brand-new skill.
@@ -129,15 +139,36 @@ visibility:
     skillIdPattern: "admin.*"
 ```
 
-**Deny for one audience** — hide `billing.refund` from the `basic` tier only (gold/platinum still see it; no-op on the public card):
+**Deny for one audience** — hide `billing.refund` from a specific client (others still see it; no-op on the public card):
 
 ```yaml
 visibility:
   - effect: deny
-    audienceType: tier
-    audienceValue: basic
+    audienceType: client
+    audienceValue: acme
     skillId: billing.refund
 ```
+
+**Public-reduced / extended-full** — hide `premium.analytics` on the anonymous public card, but expose it to any authenticated caller on the extended card. Two `surface`-scoped rules, opposite outcomes:
+
+```yaml
+defaultAllow: true
+visibility:
+  # Public well-known card: strip the skill entirely.
+  - effect: deny
+    surface: public
+    audienceType: any
+    skillId: premium.analytics
+  # Extended card: explicitly keep it for any authenticated caller
+  # (defaultAllow already keeps it, but this documents intent and wins
+  # first-match over any later extended-scoped deny).
+  - effect: allow
+    surface: extended
+    audienceType: any
+    skillId: premium.analytics
+```
+
+Disclosure only: an authenticated caller sees `premium.analytics` advertised on the extended card, but the policy does not enforce that unauthenticated callers cannot invoke it — an upstream auth policy must guard the extended endpoint.
 
 **Rewrite** — replace an existing skill's description with a governed one, leaving its `name` and `tags` intact:
 

@@ -40,10 +40,15 @@ spec:
           audienceType:
             type: string
             title: Audience type
-            enum: [any, client, scope, tier]
+            enum: [any, client, scope]
           audienceValue:
             type: string
             title: Audience value
+          surface:
+            type: string
+            title: Surface
+            description: Which card this rule applies to. Defaults to any (both public and extended).
+            enum: [any, public, extended]
           skillId:
             type: string
             title: Skill id (exact)
@@ -61,10 +66,15 @@ spec:
           audienceType:
             type: string
             title: Audience type
-            enum: [any, client, scope, tier]
+            enum: [any, client, scope]
           audienceValue:
             type: string
             title: Audience value
+          surface:
+            type: string
+            title: Surface
+            description: Which card this upsert applies to. Defaults to any (both public and extended).
+            enum: [any, public, extended]
           skill:
             type: object
             title: Skill

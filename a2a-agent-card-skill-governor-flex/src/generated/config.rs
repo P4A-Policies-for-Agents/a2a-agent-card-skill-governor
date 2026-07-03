@@ -22,6 +22,8 @@ pub struct VisibilityRule {
     pub audience_type: Option<String>,
     #[serde(alias = "audienceValue")]
     pub audience_value: Option<String>,
+    #[serde(alias = "surface")]
+    pub surface: Option<String>,
     #[serde(alias = "skillId")]
     pub skill_id: Option<String>,
     #[serde(alias = "skillIdPattern")]
@@ -34,6 +36,8 @@ pub struct SkillRule {
     pub audience_type: Option<String>,
     #[serde(alias = "audienceValue")]
     pub audience_value: Option<String>,
+    #[serde(alias = "surface")]
+    pub surface: Option<String>,
     #[serde(alias = "skill")]
     pub skill: SkillPayload,
 }

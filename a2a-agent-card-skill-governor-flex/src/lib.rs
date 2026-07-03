@@ -101,8 +101,8 @@ fn split_scopes(raw: &str) -> Vec<String> {
 }
 
 /// Build a caller [`Identity`] from the `Authentication` injectable. Reads
-/// `client_id` / `client_name` / `principal`, the scope custom property under
-/// `scope_claim_key`, and a `tier` custom property when present.
+/// `client_id` / `client_name` and the scope custom property under
+/// `scope_claim_key`.
 ///
 /// Sourced entirely from authentication data set by an upstream auth policy;
 /// missing fields degrade to `None` / empty rather than failing.
@@ -133,22 +133,9 @@ fn read_identity(auth: &Authentication, scope_claim_key: &str) -> Identity {
         })
         .unwrap_or_default();
 
-    // Tier: read from the auth custom properties. The SLA-tier policy
-    // (`rate_limit_sla`) propagates the caller's tier here as `sla-tier-name`
-    // (the human tier name, e.g. "Gold") and `sla-tier-id`. `AuthenticationData`
-    // has no first-class tier field, so this is the canonical channel. Prefer the
-    // name (what operators write `tier` rules against), fall back to the id, then
-    // to legacy spellings for robustness. Degrades to `None` if none are present.
-    let tier = props.and_then(|p| {
-        ["sla-tier-name", "sla-tier-id", "tier", "sla_tier", "slaTier"]
-            .iter()
-            .find_map(|k| p.get(*k).and_then(|v| v.as_str()).map(str::to_owned))
-    });
-
     Identity {
         client_id: data.client_id,
         client_name: data.client_name,
-        tier,
         scopes,
     }
 }

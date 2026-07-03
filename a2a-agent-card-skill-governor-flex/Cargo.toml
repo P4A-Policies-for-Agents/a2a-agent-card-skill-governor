@@ -3,7 +3,7 @@
 
 [package]
 name = "a_two_a_agent_card_skill_governor"
-version = "0.1.0"
+version = "0.2.0"
 rust-version = "1.88.0"
 edition = "2021"
 resolver = "2"
@@ -15,7 +15,7 @@ crate-type = ["cdylib"]
 
 [package.metadata.anypoint]
 group_id = "00000000-0000-0000-0000-000000000000"
-definition_asset_id = { name = "a-two-a-agent-card-skill-governor", version = "0.1.0" }
+definition_asset_id = { name = "a-two-a-agent-card-skill-governor", version = "0.2.0" }
 implementation_asset_id = "a-two-a-agent-card-skill-governor-flex"
 
 [dependencies]
