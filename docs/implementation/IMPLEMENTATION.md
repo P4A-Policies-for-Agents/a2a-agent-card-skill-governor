@@ -66,7 +66,7 @@ Identity comes from the Anypoint `Authentication` injectable only (no raw token 
 Scope is read from the operator-configured `scopeClaimKey` (default `scope`) and accepts
 a string or an array of strings.
 
-**SLA tier was removed as an audience in v0.2.0.** An earlier design probed `properties`
+**SLA tier was removed as an audience in v1.0.0.** An earlier design probed `properties`
 for an SLA tier (`sla-tier-name`/`sla-tier-id` plus legacy `tier`/`sla_tier`/`slaTier`
 fallbacks) to back an `audienceType: tier`. Using an SLA/rate-limit concept as a
 disclosure audience conflated two concerns and required an upstream SLA policy to

@@ -4,7 +4,7 @@ version = 4
 
 [[package]]
 name = "a_two_a_agent_card_skill_governor"
-version = "0.2.0"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "httpmock",

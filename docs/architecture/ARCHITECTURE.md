@@ -176,7 +176,7 @@ Missing fields degrade gracefully rather than failing.
 `Authentication` custom properties (`sla-tier-name` / `sla-tier-id`) as a
 `tier` audience. That coupled a rate-limit/SLA concept to disclosure control and
 depended on an upstream SLA policy propagating the property; it was removed in
-v0.2.0. The public/extended distinction it was sometimes used to approximate is
+v1.0.0. The public/extended distinction it was sometimes used to approximate is
 now expressed directly by the orthogonal `surface` axis. A config still carrying
 `audienceType: tier` hits the "unknown audienceType ⇒ WARN + drop rule" path
 (soft removal — no hard failure); the rule simply stops firing.
